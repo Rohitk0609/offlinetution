@@ -8,7 +8,6 @@ English-only Android tuition management app based on the supplied UI reference.
 - No server
 - No login
 - No internet required
-- No encryption required
 - Local backup/restore design
 
 ## Implemented foundation
