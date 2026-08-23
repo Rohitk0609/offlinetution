@@ -19,6 +19,8 @@ interface TuitionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertAttendance(attendance: AttendanceEntity)
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun audit(log: AuditLogEntity)
 
+    @Query("DELETE FROM students WHERE studentId = :id") suspend fun deleteStudent(id: String)
+
     @Query("SELECT * FROM fee_records WHERE studentId = :studentId AND billingPeriod = :period LIMIT 1")
     suspend fun fee(studentId: String, period: String): FeeRecordEntity?
 
@@ -33,6 +35,12 @@ interface TuitionDao {
 
     @Query("SELECT * FROM fee_records WHERE billingPeriod = :period ORDER BY studentId")
     suspend fun feesForPeriod(period: String): List<FeeRecordEntity>
+
+    @Query("SELECT * FROM attendance WHERE studentId = :studentId AND date = :date LIMIT 1")
+    suspend fun attendance(studentId: String, date: String): AttendanceEntity?
+
+    @Query("SELECT * FROM attendance WHERE date = :date")
+    suspend fun attendanceForDate(date: String): List<AttendanceEntity>
 
     @Query("SELECT * FROM students")
     suspend fun allStudents(): List<StudentEntity>
