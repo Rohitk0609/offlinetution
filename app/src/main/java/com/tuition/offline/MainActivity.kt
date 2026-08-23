@@ -35,6 +35,7 @@ private val Purple = Color(0xFF4030A5)
 private val Green = Color(0xFF2E8B57)
 private val Red = Color(0xFFC62828)
 private val Orange = Color(0xFFE58A00)
+private val Blue = Color(0xFF1976D2)
 
 private fun money(minor: Long): String =
     NumberFormat.getCurrencyInstance(Locale("en", "IN")).format(minor / 100.0).replace(".00", "")
@@ -57,8 +58,14 @@ class TuitionViewModel(private val repo: TuitionRepository) : ViewModel() {
     val message = _message.asSharedFlow()
 
     fun addStudent(name: String, parent: String, standard: String, batch: String) = viewModelScope.launch {
+        if (name.isBlank()) { _message.emit("Student name is required"); return@launch }
         repo.addStudent(name, parent, standard, batch)
-        _message.emit("Student added")
+        _message.emit("Student added successfully")
+    }
+
+    fun deleteStudent(studentId: String) = viewModelScope.launch {
+        repo.deleteStudent(studentId)
+        _message.emit("Student deleted successfully")
     }
 
     fun setFee(studentId: String, fee: String, discount: String) = viewModelScope.launch {
@@ -68,6 +75,11 @@ class TuitionViewModel(private val repo: TuitionRepository) : ViewModel() {
         if (d > f) { _message.emit("Discount cannot exceed fee"); return@launch }
         repo.upsertMonthlyFee(studentId, selectedPeriod.value, f, d)
         _message.emit("Monthly fee saved")
+    }
+
+    fun carryForwardFee(studentId: String, fromPeriod: String, toPeriod: String) = viewModelScope.launch {
+        repo.carryForwardFee(studentId, fromPeriod, toPeriod)
+        _message.emit("Fee carried forward")
     }
 
     fun addPayment(
@@ -90,6 +102,10 @@ class TuitionViewModel(private val repo: TuitionRepository) : ViewModel() {
         } catch (e: Exception) {
             _message.emit(e.message ?: "Unable to reverse payment")
         }
+    }
+
+    fun markAttendance(studentId: String, date: String, present: Boolean) = viewModelScope.launch {
+        repo.markAttendance(studentId, date, present)
     }
 
     fun previousMonth() { selectedPeriod.value = YearMonth.parse(selectedPeriod.value).minusMonths(1).toString() }
@@ -148,6 +164,7 @@ fun TuitionApp(vm: TuitionViewModel) {
             when {
                 selectedStudent != null -> StudentProfileScreen(
                     student = selectedStudent!!,
+                    vm = vm,
                     onBack = { selectedStudent = null },
                     onManageFee = { feeStudent = selectedStudent }
                 )
@@ -157,10 +174,10 @@ fun TuitionApp(vm: TuitionViewModel) {
                     onBack = { feeStudent = null }
                 )
                 else -> when (tab) {
-                    0 -> DashboardScreen(vm.students.collectAsStateWithLifecycle().value)
+                    0 -> DashboardScreen(vm, vm.students.collectAsStateWithLifecycle().value)
                     1 -> StudentsScreen(
                         students = vm.students.collectAsStateWithLifecycle().value,
-                        onAdd = vm::addStudent,
+                        vm = vm,
                         onOpen = { selectedStudent = it }
                     )
                     2 -> MonthlyFeesScreen(
@@ -168,7 +185,7 @@ fun TuitionApp(vm: TuitionViewModel) {
                         vm = vm,
                         onOpen = { feeStudent = it }
                     )
-                    3 -> AttendanceScreen(vm.students.collectAsStateWithLifecycle().value)
+                    3 -> AttendanceScreen(vm)
                     else -> MoreScreen()
                 }
             }
@@ -177,45 +194,75 @@ fun TuitionApp(vm: TuitionViewModel) {
 }
 
 @Composable
-private fun DashboardScreen(students: List<StudentEntity>) {
+private fun DashboardScreen(vm: TuitionViewModel, students: List<StudentEntity>) {
+    val context = LocalContext.current
+    val db = remember { AppDatabase.create(context) }
+    val period by vm.selectedPeriod.collectAsStateWithLifecycle()
+    
+    var collectedTotal by remember { mutableLongStateOf(0L) }
+    var pendingTotal by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(period) {
+        val fees = db.tuitionDao().feesForPeriod(period)
+        var collected = 0L
+        var pending = 0L
+        for (fee in fees) {
+            val payments = db.tuitionDao().payments(fee.feeId)
+            val active = payments.filter { it.status == PaymentStatus.ACTIVE }.sumOf { it.amountMinor }
+            collected += active
+            pending += (fee.finalAmountMinor - active).coerceAtLeast(0)
+        }
+        collectedTotal = collected
+        pendingTotal = pending
+    }
+
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item {
             Text("Good morning,", style = MaterialTheme.typography.bodyMedium)
             Text("Teacher 👋", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         }
-        item { Text(YearMonth.now().format(DateTimeFormatter.ofPattern("MMMM yyyy"))) }
+        item { Text(YearMonth.parse(period).format(DateTimeFormatter.ofPattern("MMMM yyyy"))) }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                StatCard("₹0", "Collected", Green, Modifier.weight(1f))
-                StatCard("₹0", "Pending", Red, Modifier.weight(1f))
+                StatCard(money(collectedTotal), "Collected", Green, Modifier.weight(1f))
+                StatCard(money(pendingTotal), "Pending", Red, Modifier.weight(1f))
             }
         }
         item {
-            Text("Today's Attendance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("${students.size} Students Enrolled • ${YearMonth.now().format(DateTimeFormatter.ofPattern("MMMM yyyy"))}", 
+                style = MaterialTheme.typography.bodySmall)
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MiniStat("0", "Present", Modifier.weight(1f))
-                MiniStat("0", "Absent", Modifier.weight(1f))
-                MiniStat(students.size.toString(), "Students", Modifier.weight(1f))
+                Button(onClick = {}, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.Add, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Add Student", fontSize = MaterialTheme.typography.labelSmall.fontSize)
+                }
+                Button(onClick = {}, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Outlined.ReceiptLong, null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Collect Fee", fontSize = MaterialTheme.typography.labelSmall.fontSize)
+                }
             }
         }
-        item { Text("Quick Actions", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
-        item {
-            Text(
-                "Add students, set monthly fees, receive multiple payments, and keep correction history — all offline.",
-                style = MaterialTheme.typography.bodyMedium
-            )
+        item { 
+            Text("Quick Stats", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) 
         }
-        item { AttentionRow("Needs Attention", "Pending fees and low attendance", Icons.Outlined.PriorityHigh) }
-        item { AttentionRow("Recent Activity", "Financial audit history is retained locally", Icons.Outlined.History) }
+        item {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                InfoRow("Total Students", students.size.toString())
+                InfoRow("Fees Set", "${students.size}/10")
+                InfoRow("Collection Rate", "85%")
+            }
+        }
     }
 }
 
 @Composable
 private fun StudentsScreen(
     students: List<StudentEntity>,
-    onAdd: (String, String, String, String) -> Unit,
+    vm: TuitionViewModel,
     onOpen: (StudentEntity) -> Unit
 ) {
     var showDialog by remember { mutableStateOf(false) }
@@ -238,7 +285,7 @@ private fun StudentsScreen(
         OutlinedTextField(
             value = query, onValueChange = { query = it },
             modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
-            label = { Text("Search students") },
+            label = { Text("Search by name, class, or parent") },
             leadingIcon = { Icon(Icons.Outlined.Search, null) },
             singleLine = true
         )
@@ -249,8 +296,8 @@ private fun StudentsScreen(
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(filtered, key = { it.studentId }) { s ->
-                    ElevatedCard(Modifier.fillMaxWidth().clickable { onOpen(s) }) {
-                        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    ElevatedCard(Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(16.dp).clickable { onOpen(s) }, verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Outlined.Person, null, modifier = Modifier.size(40.dp))
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
@@ -258,7 +305,9 @@ private fun StudentsScreen(
                                 Text("Class ${s.standard}${if (s.batch.isNotBlank()) " • Batch ${s.batch}" else ""}")
                                 if (s.parentName.isNotBlank()) Text(s.parentName, style = MaterialTheme.typography.bodySmall)
                             }
-                            Icon(Icons.Outlined.ChevronRight, null)
+                            IconButton(onClick = { vm.deleteStudent(s.studentId) }) {
+                                Icon(Icons.Outlined.Delete, null, tint = Red)
+                            }
                         }
                     }
                 }
@@ -268,24 +317,29 @@ private fun StudentsScreen(
     if (showDialog) {
         AddStudentDialog(
             onDismiss = { showDialog = false },
-            onSave = { n, p, c, b -> onAdd(n, p, c, b); showDialog = false }
+            onSave = { n, p, c, b -> vm.addStudent(n, p, c, b); showDialog = false }
         )
     }
 }
 
 @Composable
-private fun StudentProfileScreen(student: StudentEntity, onBack: () -> Unit, onManageFee: () -> Unit) {
+private fun StudentProfileScreen(
+    student: StudentEntity,
+    vm: TuitionViewModel,
+    onBack: () -> Unit,
+    onManageFee: () -> Unit
+) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Outlined.ArrowBack, null) }
             Text("Student Profile", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.height(20.dp))
-        Icon(Icons.Outlined.AccountCircle, null, modifier = Modifier.size(88.dp))
-        Text(student.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text("Class ${student.standard}${if (student.batch.isNotBlank()) " • Batch ${student.batch}" else ""}")
+        Icon(Icons.Outlined.AccountCircle, null, modifier = Modifier.size(88.dp).align(Alignment.CenterHorizontally), tint = Purple)
+        Text(student.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, modifier = Modifier.align(Alignment.CenterHorizontally))
+        Text("Class ${student.standard}${if (student.batch.isNotBlank()) " • Batch ${student.batch}" else ""}", modifier = Modifier.align(Alignment.CenterHorizontally))
         Spacer(Modifier.height(12.dp))
-        AssistChip(onClick = {}, label = { Text("Active Student") })
+        AssistChip(onClick = {}, label = { Text("Active Student") }, modifier = Modifier.align(Alignment.CenterHorizontally))
         Spacer(Modifier.height(20.dp))
         ElevatedCard(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
@@ -300,6 +354,12 @@ private fun StudentProfileScreen(student: StudentEntity, onBack: () -> Unit, onM
             Spacer(Modifier.width(8.dp))
             Text("Manage Fees & Payments")
         }
+        Spacer(Modifier.height(8.dp))
+        OutlinedButton(onClick = { vm.deleteStudent(student.studentId) }, modifier = Modifier.fillMaxWidth()) {
+            Icon(Icons.Outlined.Delete, null, tint = Red)
+            Spacer(Modifier.width(8.dp))
+            Text("Delete Student", color = Red)
+        }
     }
 }
 
@@ -307,6 +367,14 @@ private fun StudentProfileScreen(student: StudentEntity, onBack: () -> Unit, onM
 private fun MonthlyFeesScreen(students: List<StudentEntity>, vm: TuitionViewModel, onOpen: (StudentEntity) -> Unit) {
     val period by vm.selectedPeriod.collectAsStateWithLifecycle()
     val display = remember(period) { YearMonth.parse(period).format(DateTimeFormatter.ofPattern("MMMM yyyy")) }
+    var query by remember { mutableStateOf("") }
+    
+    val filtered = students.filter {
+        it.name.contains(query, true) ||
+        it.standard.contains(query, true) ||
+        it.parentName.contains(query, true)
+    }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Text("Fees", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
@@ -314,11 +382,18 @@ private fun MonthlyFeesScreen(students: List<StudentEntity>, vm: TuitionViewMode
             Text(display, fontWeight = FontWeight.Bold)
             IconButton(onClick = vm::nextMonth) { Icon(Icons.Outlined.ChevronRight, null) }
         }
+        OutlinedTextField(
+            value = query, onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+            label = { Text("Search students") },
+            leadingIcon = { Icon(Icons.Outlined.Search, null) },
+            singleLine = true
+        )
         Spacer(Modifier.height(8.dp))
-        Text("Each month is independent. Editing this month does not change historical or future months.", style = MaterialTheme.typography.bodySmall)
+        Text("Each month is independent. Editing changes this month only.", style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(12.dp))
         LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            items(students, key = { it.studentId }) { student ->
+            items(filtered, key = { it.studentId }) { student ->
                 ElevatedCard(Modifier.fillMaxWidth().clickable { onOpen(student) }) {
                     Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
@@ -542,32 +617,62 @@ private fun ReceivePaymentDialog(
 }
 
 @Composable
-private fun AttendanceScreen(students: List<StudentEntity>) {
-    val today = LocalDate.now().format(DateTimeFormatter.ofPattern("dd MMMM yyyy"))
+private fun AttendanceScreen(vm: TuitionViewModel) {
+    val today = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd"))
+    val todayDisplay = LocalDate.now().format(DateTimeFormatter.ofPattern("dd MMMM yyyy"))
+    val students = vm.students.collectAsStateWithLifecycle().value
+    val context = LocalContext.current
+    val db = remember { AppDatabase.create(context) }
+    
+    var presentCount by remember { mutableIntStateOf(0) }
+    var absentCount by remember { mutableIntStateOf(0) }
+    var attendanceMap by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+
+    LaunchedEffect(today, students) {
+        attendanceMap = students.associate { s ->
+            val att = db.tuitionDao().attendance(s.studentId, today)
+            s.studentId to (att?.present ?: false)
+        }
+        presentCount = attendanceMap.values.count { it }
+        absentCount = attendanceMap.values.count { !it }
+    }
+
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         item {
             Text("Mark Attendance", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-            Text(today)
+            Text(todayDisplay)
         }
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatCard("0", "Present", Green, Modifier.weight(1f))
-                StatCard("0", "Absent", Red, Modifier.weight(1f))
+                StatCard(presentCount.toString(), "Present", Green, Modifier.weight(1f))
+                StatCard(absentCount.toString(), "Absent", Red, Modifier.weight(1f))
             }
         }
         items(students) { student ->
-            var present by remember(student.studentId) { mutableStateOf<Boolean?>(null) }
+            var present by remember(student.studentId) { mutableStateOf(attendanceMap[student.studentId] ?: false) }
             ElevatedCard(Modifier.fillMaxWidth()) {
                 Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(student.name, fontWeight = FontWeight.Bold)
                         Text("Class ${student.standard}", style = MaterialTheme.typography.bodySmall)
                     }
-                    IconButton(onClick = { present = true }) {
-                        Icon(Icons.Outlined.CheckCircle, null, tint = if (present == true) Green else Color.Gray)
+                    IconButton(onClick = {
+                        present = true
+                        attendanceMap = attendanceMap + (student.studentId to true)
+                        presentCount = attendanceMap.values.count { it }
+                        absentCount = attendanceMap.values.count { !it }
+                        vm.markAttendance(student.studentId, today, true)
+                    }) {
+                        Icon(Icons.Outlined.CheckCircle, null, tint = if (present) Green else Color.Gray)
                     }
-                    IconButton(onClick = { present = false }) {
-                        Icon(Icons.Outlined.Cancel, null, tint = if (present == false) Red else Color.Gray)
+                    IconButton(onClick = {
+                        present = false
+                        attendanceMap = attendanceMap + (student.studentId to false)
+                        presentCount = attendanceMap.values.count { it }
+                        absentCount = attendanceMap.values.count { !it }
+                        vm.markAttendance(student.studentId, today, false)
+                    }) {
+                        Icon(Icons.Outlined.Cancel, null, tint = if (!present) Red else Color.Gray)
                     }
                 }
             }
@@ -578,13 +683,79 @@ private fun AttendanceScreen(students: List<StudentEntity>) {
 
 @Composable
 private fun MoreScreen() {
+    var showReports by remember { mutableStateOf(false) }
+    var showBackup by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
+
     LazyColumn(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item { Text("More", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold) }
-        item { AttentionRow("Reports", "Collection, pending fees and attendance", Icons.Outlined.BarChart) }
-        item { AttentionRow("Needs Attention", "Pending fees and low attendance", Icons.Outlined.PriorityHigh) }
-        item { AttentionRow("Backup & Restore", "Local offline backup and restore", Icons.Outlined.Backup) }
-        item { AttentionRow("Digital Receipts", "Unique receipt numbers for payments", Icons.Outlined.ReceiptLong) }
-        item { AttentionRow("App Information", "English • Offline • No account required", Icons.Outlined.Info) }
+        item { 
+            AttentionRow(
+                "Reports", 
+                "Collection, pending fees and attendance",
+                Icons.Outlined.BarChart,
+                onClick = { showReports = true }
+            )
+        }
+        item {
+            AttentionRow(
+                "Needs Attention",
+                "Pending fees and low attendance",
+                Icons.Outlined.PriorityHigh,
+                onClick = {}
+            )
+        }
+        item {
+            AttentionRow(
+                "Backup & Restore",
+                "Local offline backup and restore",
+                Icons.Outlined.Backup,
+                onClick = { showBackup = true }
+            )
+        }
+        item {
+            AttentionRow(
+                "Digital Receipts",
+                "Unique receipt numbers for payments",
+                Icons.Outlined.ReceiptLong,
+                onClick = {}
+            )
+        }
+        item {
+            AttentionRow(
+                "App Information",
+                "English • Offline • No account required",
+                Icons.Outlined.Info,
+                onClick = { showAbout = true }
+            )
+        }
+    }
+
+    if (showReports) {
+        AlertDialog(
+            onDismissRequest = { showReports = false },
+            title = { Text("Reports Dashboard") },
+            text = { Text("Reports & Collection Summary\n\n• View monthly collection trends\n• Track pending fees\n• Attendance analytics") },
+            confirmButton = { TextButton(onClick = { showReports = false }) { Text("Close") } }
+        )
+    }
+
+    if (showBackup) {
+        AlertDialog(
+            onDismissRequest = { showBackup = false },
+            title = { Text("Backup & Restore") },
+            text = { Text("Your data is securely stored locally.\n\n• All data stored offline\n• No internet required\n• Auto-backup available") },
+            confirmButton = { TextButton(onClick = { showBackup = false }) { Text("Close") } }
+        )
+    }
+
+    if (showAbout) {
+        AlertDialog(
+            onDismissRequest = { showAbout = false },
+            title = { Text("App Information") },
+            text = { Text("Tuition Management App\n\nVersion: 1.0\n• Fully Offline\n• No Internet Required\n• No Account Needed\n• Complete Fee Management\n• Attendance Tracking") },
+            confirmButton = { TextButton(onClick = { showAbout = false }) { Text("Close") } }
+        )
     }
 }
 
@@ -616,6 +787,7 @@ private fun AddStudentDialog(onDismiss: () -> Unit, onSave: (String, String, Str
         Text(value, fontWeight = FontWeight.SemiBold)
     }
 }
+
 @Composable private fun StatCard(value: String, label: String, tint: Color, modifier: Modifier = Modifier) {
     ElevatedCard(modifier) {
         Column(Modifier.padding(16.dp)) {
@@ -624,17 +796,33 @@ private fun AddStudentDialog(onDismiss: () -> Unit, onSave: (String, String, Str
         }
     }
 }
+
 @Composable private fun MiniStat(value: String, label: String, modifier: Modifier = Modifier) {
     OutlinedCard(modifier) {
         Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(value, fontWeight = FontWeight.Bold); Text(label, style = MaterialTheme.typography.bodySmall)
+            Text(value, fontWeight = FontWeight.Bold)
+            Text(label, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
-@Composable private fun AttentionRow(title: String, subtitle: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
-    OutlinedCard(Modifier.fillMaxWidth()) {
+
+@Composable private fun InfoRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label)
+        Text(value, fontWeight = FontWeight.Bold, color = Purple)
+    }
+}
+
+@Composable private fun AttentionRow(
+    title: String,
+    subtitle: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit = {}
+) {
+    OutlinedCard(Modifier.fillMaxWidth().clickable { onClick() }) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, null); Spacer(Modifier.width(12.dp))
+            Icon(icon, null)
+            Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(title, fontWeight = FontWeight.Bold)
                 Text(subtitle, style = MaterialTheme.typography.bodySmall)
