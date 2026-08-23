@@ -1,6 +1,7 @@
 package com.tuition.offline.data
 
 import androidx.room.withTransaction
+import java.time.YearMonth
 import java.util.UUID
 
 class TuitionRepository(private val db: AppDatabase) {
@@ -22,25 +23,41 @@ class TuitionRepository(private val db: AppDatabase) {
         }
     }
 
-    suspend fun upsertMonthlyFee(studentId: String, period: String, feeMinor: Long, discountMinor: Long) {
+    suspend fun upsertMonthlyFee(studentId: String, period: String, feeMinor: Long, discountMinor: Long, applyToFuture: Boolean = false) {
         val old = dao.fee(studentId, period)
         val fee = (old ?: FeeRecordEntity(studentId = studentId, billingPeriod = period, feeAmountMinor = feeMinor, discountMinor = discountMinor))
             .copy(feeAmountMinor = feeMinor, discountMinor = discountMinor, updatedAt = System.currentTimeMillis())
         dao.upsertFee(fee)
         audit("FeeRecord", fee.feeId, if (old == null) "CREATED" else "EDITED", "Fee for $period")
+        
+        // If applyToFuture is true, carry forward to next month
+        if (applyToFuture) {
+            val nextPeriod = YearMonth.parse(period).plusMonths(1).toString()
+            carryForwardFee(studentId, period, nextPeriod)
+        }
     }
 
     suspend fun carryForwardFee(studentId: String, fromPeriod: String, toPeriod: String) {
         val fromFee = dao.fee(studentId, fromPeriod)
         if (fromFee != null) {
-            val newFee = FeeRecordEntity(
-                studentId = studentId,
-                billingPeriod = toPeriod,
-                feeAmountMinor = fromFee.feeAmountMinor,
-                discountMinor = fromFee.discountMinor
-            )
-            dao.upsertFee(newFee)
-            audit("FeeRecord", newFee.feeId, "CREATED", "Fee carried forward from $fromPeriod to $toPeriod")
+            val existingFee = dao.fee(studentId, toPeriod)
+            if (existingFee == null) {
+                val newFee = FeeRecordEntity(
+                    studentId = studentId,
+                    billingPeriod = toPeriod,
+                    feeAmountMinor = fromFee.feeAmountMinor,
+                    discountMinor = fromFee.discountMinor
+                )
+                dao.upsertFee(newFee)
+                audit("FeeRecord", newFee.feeId, "CREATED", "Fee carried forward from $fromPeriod to $toPeriod")
+            }
+        }
+    }
+
+    suspend fun autoCarryForwardAllFees(fromPeriod: String, toPeriod: String) {
+        val fees = dao.feesForPeriod(fromPeriod)
+        for (fee in fees) {
+            carryForwardFee(fee.studentId, fromPeriod, toPeriod)
         }
     }
 
@@ -134,6 +151,19 @@ class TuitionRepository(private val db: AppDatabase) {
 
     suspend fun getAttendanceReport(date: String): Map<String, Boolean> {
         return dao.attendanceForDate(date).associate { it.studentId to it.present }
+    }
+
+    suspend fun getStudentFeeStatus(studentId: String, period: String): FeeStatus {
+        val fee = dao.fee(studentId, period) ?: return FeeStatus.PENDING
+        val payments = dao.payments(fee.feeId)
+        val collected = payments.filter { it.status == PaymentStatus.ACTIVE }.sumOf { it.amountMinor }
+        return when {
+            fee.finalAmountMinor == 0L -> FeeStatus.PAID
+            collected <= 0L -> FeeStatus.PENDING
+            collected < fee.finalAmountMinor -> FeeStatus.PARTIAL
+            collected == fee.finalAmountMinor -> FeeStatus.PAID
+            else -> FeeStatus.OVERPAID
+        }
     }
 
     suspend fun audit(type: String, id: String, action: String, detail: String) {
