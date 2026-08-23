@@ -14,6 +14,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -340,7 +341,8 @@ private fun FeeHistoryScreen(student: StudentEntity, vm: TuitionViewModel, onBac
     var showSetFee by remember { mutableStateOf(false) }
     var showPayment by remember { mutableStateOf(false) }
 
-    val db = remember { AppDatabase.create(androidx.compose.ui.platform.LocalContext.current) }
+    val context = LocalContext.current
+    val db = remember { AppDatabase.create(context) }
     val feeState = produceState<FeeRecordEntity?>(null, student.studentId, period) {
         value = db.tuitionDao().fee(student.studentId, period)
     }
@@ -492,6 +494,7 @@ private fun PaymentRow(payment: PaymentEntity, onReverse: (String) -> Unit) {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReceivePaymentDialog(
     onDismiss: () -> Unit,
